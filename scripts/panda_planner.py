@@ -10,6 +10,9 @@ from shape_msgs.msg import SolidPrimitive
 from tf.transformations import quaternion_from_euler
 import math
 import numpy as np
+from moveit_msgs.msg import RobotState
+from sensor_msgs.msg import JointState
+from std_msgs.msg import Header
 
 from six.moves import input
 
@@ -51,46 +54,93 @@ def build_the_scene(scene):
                                      pose=[0.3, 0.3, 0.025])
     scene.add_object(target)
 
-def reach_pose(move_group, pose, tolerance=0.001):
-    move_group.set_pose_target(pose)
-    move_group.set_goal_position_tolerance(tolerance)
+def reach_pose(move_group, pose, tolerance=0.001, whether_execute=True, start_angle_values=None, robot=None, whether_to_attach=True, scene=None):
+    if whether_execute:
+        move_group.set_pose_target(pose)
+        move_group.set_goal_position_tolerance(tolerance)
 
-    # return move_group.go(wait=True)
+        # return move_group.go(wait=True)
 
-    success, plan, _, _ = move_group.plan()
+        success, plan, _, _ = move_group.plan()
 
-    if success:
-        # print('[Reach pose]: planned trajectory is:')
-        # print(plan)
-        move_group.execute(plan, wait=True)
+        if success:
+            # print('[Reach pose]: planned trajectory is:')
+            # print(plan)
+            move_group.execute(plan, wait=True)
+        else:
+            print("[Reach pose]: Unsuccessful plan")
     else:
-        print("[Reach pose]: Unsuccessful plan")
+        # manually set the starting joint values for the plan
+        joint_state = JointState()
+        joint_state.header = Header()
+        joint_state.header.stamp = rospy.Time.now()
+        joint_state.name = robot.get_joint_names(group='panda_arm')[:-1] + robot.get_joint_names(group='panda_hand')[1:]
+        joint_state.position = start_angle_values
+        moveit_robot_state = RobotState()
+        moveit_robot_state.joint_state = joint_state
+        move_group.set_start_state(moveit_robot_state)
+
+        if whether_to_attach:
+            attach_target_object(scene, robot, move_group)
+
+        # set target eef pose and plan the trajectory
+        move_group.set_pose_target(pose)
+        move_group.set_goal_position_tolerance(tolerance)
+
+        success, plan, _, _ = move_group.plan()
+
+        if success:
+            print('[Reach pose]: Found successful plan!')
+        else:
+            print("[Reach pose]: Unsuccessful plan")
 
     return plan
 
 
-def reach_pose_linear(move_group, pose):
+def reach_pose_linear(move_group, pose, whether_execute=True, start_angle_values=None, start_eef_pose=None, robot=None):
     waypoints = []
 
-    # add the starting point
-    start_pose = move_group.get_current_pose().pose
-    waypoints.append(start_pose)
+    if whether_execute:
+        # add the starting eef pose
+        start_pose = move_group.get_current_pose().pose
+        waypoints.append(start_pose)
 
-    # add the end point
-    waypoints.append(pose)
+        # add the end pose
+        waypoints.append(pose)
 
-    (plan, fraction) = move_group.compute_cartesian_path(waypoints=waypoints,
-                                                         eef_step=0.01,
-                                                         jump_threshold=0.00,
-                                                         avoid_collisions = True,
-                                                         path_constraints = None)
-    # print("[Reach pose linear]: planned trajectory is:")
-    # print(plan)
+        (plan, fraction) = move_group.compute_cartesian_path(waypoints=waypoints,
+                                                             eef_step=0.01,
+                                                             jump_threshold=0.00,
+                                                             avoid_collisions = True,
+                                                             path_constraints = None)
+        # print("[Reach pose linear]: planned trajectory is:")
+        # print(plan)
 
-    move_group.execute(plan, wait=True)
+        move_group.execute(plan, wait=True)
+    else:
+        # manually set the starting joint values for the plan
+        joint_state = JointState()
+        joint_state.header = Header()
+        joint_state.header.stamp = rospy.Time.now()
+        joint_state.name = robot.get_joint_names(group='panda_arm')[:-1] + robot.get_joint_names(group='panda_hand')[1:]
+        joint_state.position = start_angle_values
+        moveit_robot_state = RobotState()
+        moveit_robot_state.joint_state = joint_state
+        move_group.set_start_state(moveit_robot_state)
+
+        # add the starting eef pose
+        waypoints.append(start_eef_pose)
+
+        # add the end pose
+        waypoints.append(pose)
+
+        (plan, fraction) = move_group.compute_cartesian_path(waypoints=waypoints,
+                                                             eef_step=0.01,
+                                                             jump_threshold=0.00,
+                                                             avoid_collisions=True,
+                                                             path_constraints=None)
 
     return plan
-
 
 def go_home_pose(move_group):
     move_group.set_named_target('ready')
@@ -163,7 +213,7 @@ def append_gripper_trajectory(gripper_state, planned_trajectory):
 
     return planned_trajectory
 
-def pick(planned_trajectory, scene, robot, move_group, gripper_joints, pre_grasp_pos, grasp_pos, pre_grasp_ori_euler=[math.pi, 0.0, math.pi/4.0], grasp_ori_euler=[math.pi, 0.0, math.pi/4.0]):
+def pick(planned_trajectory, scene, robot, move_group, gripper_joints, pre_grasp_pos, grasp_pos, pre_grasp_ori_euler=[math.pi, 0.0, math.pi/4.0], grasp_ori_euler=[math.pi, 0.0, math.pi/4.0], whether_execute=True):
     # define pre-grasp pose
     pre_grasp_pose = Pose()
     pre_grasp_pose.position.x = pre_grasp_pos[0]
@@ -186,37 +236,76 @@ def pick(planned_trajectory, scene, robot, move_group, gripper_joints, pre_grasp
     grasp_pose.orientation.z = orientation[2]
     grasp_pose.orientation.w = orientation[3]
 
-    # the robot reaches for the pre-grasp pose and open the gripper
-    print('[Pick]: going to pre-grasp ...')
-    # reach_pose(move_group, pre_grasp_pose)
-    plan = reach_pose_linear(move_group, pre_grasp_pose)
-    planned_trajectory = append_planned_trajectory(plan=plan, planned_trajectory=planned_trajectory, gripper_state='open')
+    if whether_execute:
+        # the robot reaches for the pre-grasp pose and open the gripper
+        print('[Pick]: going to pre-grasp ...')
+        # reach_pose(move_group, pre_grasp_pose)
+        plan = reach_pose_linear(move_group, pre_grasp_pose)
+        planned_trajectory = append_planned_trajectory(plan=plan, planned_trajectory=planned_trajectory, gripper_state='open')
 
-    print('[Pick]: Pre-grasp finished. Going to open the gripper ...')
-    open_gripper(gripper_joints=gripper_joints)
-    planned_trajectory = append_gripper_trajectory(gripper_state='open', planned_trajectory=planned_trajectory)
+        print('[Pick]: Pre-grasp finished. Going to open the gripper ...')
+        open_gripper(gripper_joints=gripper_joints)
+        planned_trajectory = append_gripper_trajectory(gripper_state='open', planned_trajectory=planned_trajectory)
 
-    # the robot reaches for the grasp pose and grasp the target object
-    print('[Pick]: Gripper is opened. Going to the grasp pose ...')
-    # reach_pose(move_group, grasp_pose)
-    plan = reach_pose_linear(move_group, grasp_pose)
-    planned_trajectory = append_planned_trajectory(plan=plan, planned_trajectory=planned_trajectory, gripper_state='open')
+        # the robot reaches for the grasp pose and grasp the target object
+        print('[Pick]: Gripper is opened. Going to the grasp pose ...')
+        # reach_pose(move_group, grasp_pose)
+        plan = reach_pose_linear(move_group, grasp_pose)
+        planned_trajectory = append_planned_trajectory(plan=plan, planned_trajectory=planned_trajectory, gripper_state='open')
 
-    print("[Pick]: Reached the grasp pose. Going to attach the target object...")
-    attach_target_object(scene=scene, robot=robot, move_group=move_group)
+        print("[Pick]: Reached the grasp pose. Going to attach the target object...")
+        attach_target_object(scene=scene, robot=robot, move_group=move_group)
 
-    print('[Pick]: The target object is attached. Going to close the gripper ...')
-    close_gripper(gripper_joints=gripper_joints)
-    planned_trajectory = append_gripper_trajectory(gripper_state='close', planned_trajectory=planned_trajectory)
+        print('[Pick]: The target object is attached. Going to close the gripper ...')
+        close_gripper(gripper_joints=gripper_joints)
+        planned_trajectory = append_gripper_trajectory(gripper_state='close', planned_trajectory=planned_trajectory)
 
-    # print('[Pick]: Gripper is closed. Going to attach the target object ...')
-    # move_group.attach_object('target')
+        # print('[Pick]: Gripper is closed. Going to attach the target object ...')
+        # move_group.attach_object('target')
 
-    print('[Pick]: All finished')
+        print('[Pick]: All finished')
+    else:
+        # input(
+        #     "============ Press `Enter` to pre-grasp ..."
+        # )
+
+        print('[Pick]: going to pre-grasp ...')
+        start_joint_values = move_group.get_current_joint_values() + [0.02, 0.02]
+        start_eef_pose = move_group.get_current_pose().pose
+        plan = reach_pose_linear(move_group, pre_grasp_pose,
+                                 whether_execute=whether_execute, start_angle_values=start_joint_values, start_eef_pose=start_eef_pose,
+                                 robot=robot)
+        planned_trajectory = append_planned_trajectory(plan=plan, planned_trajectory=planned_trajectory,
+                                                       gripper_state='open')
+
+        print('[Pick]: Pre-grasp finished. Going to open the gripper ...')
+        planned_trajectory = append_gripper_trajectory(gripper_state='open', planned_trajectory=planned_trajectory)
+
+        # input(
+        #     "============ Press `Enter` to grasp ..."
+        # )
+
+        print('[Pick]: Gripper is opened. Going to the grasp pose ...')
+        start_joint_values = planned_trajectory['pos_traj'][-1]
+        start_eef_pose = pre_grasp_pose
+        plan = reach_pose_linear(move_group, grasp_pose,
+                                 whether_execute=whether_execute, start_angle_values=start_joint_values, start_eef_pose=start_eef_pose,
+                                 robot=robot)
+        planned_trajectory = append_planned_trajectory(plan=plan, planned_trajectory=planned_trajectory,
+                                                       gripper_state='open')
+
+        print("[Pick]: Reached the grasp pose. Going to attach the target object...")
+        attach_target_object(scene=scene, robot=robot, move_group=move_group)
+
+        print('[Pick]: The target object is attached. Going to close the gripper ...')
+        planned_trajectory = append_gripper_trajectory(gripper_state='close', planned_trajectory=planned_trajectory)
+
+        print('[Pick]: All finished')
+
 
     return planned_trajectory
 
-def place(planned_trajectory, scene, move_group, gripper_joints, place_pos, post_place_pos, place_ori_euler=[math.pi, 0.0, math.pi/4.0], post_place_ori_euler=[math.pi, 0.0, math.pi/4.0]):
+def place(planned_trajectory, scene, move_group, gripper_joints, place_pos, post_place_pos, place_ori_euler=[math.pi, 0.0, math.pi/4.0], post_place_ori_euler=[math.pi, 0.0, math.pi/4.0], whether_execute=True, robot=None):
     # define place pose
     place_pose = Pose()
     place_pose.position.x = place_pos[0]
@@ -239,28 +328,62 @@ def place(planned_trajectory, scene, move_group, gripper_joints, place_pos, post
     post_place_pose.orientation.z = orientation[2]
     post_place_pose.orientation.w = orientation[3]
 
-    # the robot reaches for the place pose and open the gripper
-    print('[Place]: Going to reach for the place pose...')
-    plan = reach_pose(move_group, place_pose)
-    planned_trajectory = append_planned_trajectory(plan=plan, planned_trajectory=planned_trajectory,
-                                                   gripper_state='close')
+    if whether_execute:
+        # the robot reaches for the place pose and open the gripper
+        print('[Place]: Going to reach for the place pose...')
+        plan = reach_pose(move_group, place_pose)
+        planned_trajectory = append_planned_trajectory(plan=plan, planned_trajectory=planned_trajectory,
+                                                       gripper_state='close')
 
-    print('[Place]: Reached the place pose. Going to open the gripper...')
-    open_gripper(gripper_joints=gripper_joints)
-    planned_trajectory = append_gripper_trajectory(gripper_state='open', planned_trajectory=planned_trajectory)
+        print('[Place]: Reached the place pose. Going to open the gripper...')
+        open_gripper(gripper_joints=gripper_joints)
+        planned_trajectory = append_gripper_trajectory(gripper_state='open', planned_trajectory=planned_trajectory)
 
-    # arm.detach_object('target')
-    print('[Place]: The gripper was opened. Going to detach the target object...')
-    detach_target_object(scene=scene, move_group=move_group)
+        # arm.detach_object('target')
+        print('[Place]: The gripper was opened. Going to detach the target object...')
+        detach_target_object(scene=scene, move_group=move_group)
 
-    # the robot reaches for the post-place pose
-    print('[Place]: The target object was detached. Going to the post-place pose...')
-    # reach_pose(move_group, post_place_pose)
-    plan = reach_pose_linear(move_group, post_place_pose)
-    planned_trajectory = append_planned_trajectory(plan=plan, planned_trajectory=planned_trajectory,
-                                                   gripper_state='open')
+        # the robot reaches for the post-place pose
+        print('[Place]: The target object was detached. Going to the post-place pose...')
+        # reach_pose(move_group, post_place_pose)
+        plan = reach_pose_linear(move_group, post_place_pose)
+        planned_trajectory = append_planned_trajectory(plan=plan, planned_trajectory=planned_trajectory,
+                                                       gripper_state='open')
 
-    print('[Place]: All finished')
+        print('[Place]: All finished')
+    else:
+        # input(
+        #     "============ Press `Enter` to place ..."
+        # )
+
+        print('[Place]: Going to reach for the place pose...')
+        start_joint_values =  planned_trajectory['pos_traj'][-1]
+        plan = reach_pose(move_group, place_pose,
+                          whether_execute=whether_execute, start_angle_values=start_joint_values, robot=robot,
+                          whether_to_attach=True, scene=scene)
+        planned_trajectory = append_planned_trajectory(plan=plan, planned_trajectory=planned_trajectory,
+                                                       gripper_state='close')
+
+        print('[Place]: Reached the place pose. Going to open the gripper...')
+        planned_trajectory = append_gripper_trajectory(gripper_state='open', planned_trajectory=planned_trajectory)
+
+        print('[Place]: The gripper was opened. Going to detach the target object...')
+        detach_target_object(scene=scene, move_group=move_group)
+
+        # input(
+        #     "============ Press `Enter` to post-place ..."
+        # )
+
+        print('[Place]: The target object was detached. Going to the post-place pose...')
+        start_joint_values = planned_trajectory['pos_traj'][-1]
+        start_eef_pose = place_pose
+        plan = reach_pose_linear(move_group, post_place_pose,
+                                 whether_execute=whether_execute, start_angle_values=start_joint_values, start_eef_pose=start_eef_pose,
+                                 robot=robot)
+        planned_trajectory = append_planned_trajectory(plan=plan, planned_trajectory=planned_trajectory,
+                                                       gripper_state='open')
+
+        print('[Place]: All finished')
 
     return planned_trajectory
 
@@ -297,9 +420,7 @@ def main():
     pre_grasp_pos = [0.3, 0.3, 0.2]
     grasp_pos = [0.3, 0.3, 0.15]
     planned_trajectory = pick(planned_trajectory=planned_trajectory, scene=scene, robot=robot, move_group=move_group,
-                              gripper_joints=gripper_joints,
-                              pre_grasp_pos=pre_grasp_pos, grasp_pos=grasp_pos)
-
+                              gripper_joints=gripper_joints, pre_grasp_pos=pre_grasp_pos, grasp_pos=grasp_pos, whether_execute=False)
 
 
     # input(
@@ -312,15 +433,15 @@ def main():
     post_place_pos = [0.3, -0.3, 0.2]
     place(planned_trajectory=planned_trajectory, scene=scene, move_group=move_group,
           gripper_joints=gripper_joints,
-          place_pos=place_pos, post_place_pos=post_place_pos)
+          place_pos=place_pos, post_place_pos=post_place_pos, whether_execute=False, robot=robot)
 
     # input(
     #     "============ Press `Enter` to go home pose ..."
     # )
-    print("Going to go home pose...")
+    """print("Going to go home pose...")
 
     go_home_pose(move_group=move_group)
-
+    """
     # input(
     #     "============ Press `Enter` to clean the scene and quit ..."
     # )
@@ -329,6 +450,7 @@ def main():
 
     np.savetxt("pos_traj.csv", planned_trajectory['pos_traj'], delimiter=" ")
     np.savetxt("vel_traj.csv", planned_trajectory['vel_traj'], delimiter=" ")
+
 
 
 if __name__ == "__main__":
